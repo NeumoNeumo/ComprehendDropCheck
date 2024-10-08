@@ -13,13 +13,13 @@
 
 #![feature(dropck_eyepatch)]
 
+use jemallocator::Jemalloc;
 use std::{
     alloc::{self, Layout},
     fmt::Debug,
     marker::PhantomData,
     ptr,
 };
-use jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
@@ -43,8 +43,8 @@ fn drop_order() {
     a = A();
 }
 
-// The destructor in rust consists two parts to help us automatically drop all the resource owned
-// by an object:
+// The destructor in rust consists of two parts to help us automatically drop all the resources
+// owned by the object:
 // - the programmer customized function `Drop::drop`
 // - Drop glue that the compiler automatically attached for us
 // Run the following example to see how it works
@@ -56,7 +56,7 @@ fn drop_glue1() {
     struct B2();
     impl Drop for A {
         // Even if you don't have a drop implementation, drop glue still applies to release the
-        // resource of its members.
+        // resources of its members. But here we have an explicit implementation though.
         fn drop(&mut self) {
             println!("Drop for A called");
             // It is like the compiler automatically attaches sub-drop routine
@@ -80,7 +80,7 @@ fn drop_glue1() {
     A(B1(), B2());
 }
 
-// A drop glue only sticks OWNED members. If a member is a reference, the resource of it should be
+// A drop glue only sticks OWNED members. If a member is a reference, the resources of it should be
 // managed by its owner instead of the borrower. In simple words, who owns it drops it.
 #[allow(unused)]
 fn drop_glue2() {
@@ -95,7 +95,7 @@ fn drop_glue2() {
     impl Drop for B1 {
         fn drop(&mut self) {
             println!("Drop for B1 called NOT as part of the drop glue of A");
-            print!("Instead, this is called because its owner b1 is dropped")
+            println!("Instead, this is called because its owner b1 is dropped");
         }
     }
     impl Drop for B2 {
@@ -154,14 +154,20 @@ fn drop_glue3() {
 fn may_dangle1() {
     struct A<'a>(&'a B);
     struct B(i32);
+    impl Drop for B {
+        fn drop(&mut self) {
+            println!("B dropped here");
+        }
+    }
 
     let a;
     let b = B(42);
     a = A(&b);
-    drop(b); // &b dangles henceforth
-             // destruct a here
-             // The dangling &b doesn't matter because this is a trivial drop which means we will
-             // not visit &a in destruction at all. So the compiler lets it go.
+    drop(b); 
+    println!("&b dangles henceforth");
+    println!("a would be dropped after this line");
+    // The dangling &b doesn't matter because this is a trivial drop which means we will
+    // not visit &a in destruction at all. So the compiler lets it go.
 }
 
 // When drop is explicitly implemented for a type, it requires this type outlives its reference
@@ -183,17 +189,24 @@ fn may_dangle2() {
 
     // a gets dropped here
     // b gets dropped here. a does not live long enough but we will not deref &a. So it should be
-    // OK effectively.
+    // OK effectively. But our compiler doesn't buy it.
 }
 
-// #[may_dangle] hints the compiler not to check the lifetime/borrow of 'a
+// #[may_dangle] hints the compiler not to check the lifetime of 'a if the drop call is generated
+// by the compiler itself. But if we explicitly call the drop, the borrow check would raise an
+// compile error.
 #[allow(unused)]
 fn may_dangle3() {
     struct A(i32);
     struct B<'a>(&'a A);
+    impl Drop for A {
+        fn drop(&mut self) {
+            println!("A dropped");
+        }
+    }
     unsafe impl<#[may_dangle] 'a> Drop for B<'a> {
         fn drop(&mut self) {
-            // nothing here
+            println!("B dropped");
         }
     }
 
@@ -202,6 +215,9 @@ fn may_dangle3() {
     b = B(&a);
     // a gets dropped here
     // b gets dropped here. But #[may_dangle] makes it compiles.
+    // What would happen if we call drop explicitly? Uncomment the following two lines.
+    // drop(a);
+    // drop(b);
 }
 
 // #[may_dangle] can be used to modify generics (after all, lifetime annotation is a variety of
@@ -210,10 +226,15 @@ fn may_dangle3() {
 fn may_dangle4() {
     struct A(i32);
     struct B<T>(T);
+    impl Drop for A {
+        fn drop(&mut self) {
+            println!("A dropped");
+        }
+    }
     unsafe impl<#[may_dangle] T> Drop for B<T> {
         // impl<T> Drop for B<T> { // What happens if you uncomment this line?
         fn drop(&mut self) {
-            // nothing here
+            println!("B dropped");
         }
     }
 
@@ -231,9 +252,9 @@ fn may_dangle5() {
     struct B<T: Debug>(T);
     unsafe impl<#[may_dangle] T: Debug> Drop for B<T> {
         fn drop(&mut self) {
-            // Warning! You told the compiler that you would not use T again but you did!
-            // You'd probably get a random number other than 42.
-            // It is 0 or 1 on my machine.
+            // Warning! You told the compiler that you would not use T again but you did! You'd
+            // probably get a random number other than 42. It is 0 or 1 in my system alloc. It may
+            // remains 42 in jemalloc. But that is not guarenteed in general.
             println!("{:?}", self.0);
         }
     }
@@ -272,7 +293,6 @@ fn may_dangle7() {
     struct A();
     struct B<T>(T); // T, which turns out to be A, is owned by B
     unsafe impl<#[may_dangle] T> Drop for B<T> {
-        // impl<T> Drop for B<T> { // What happens if you uncomment this line?
         fn drop(&mut self) {
             println!("B dropped");
         }
@@ -302,6 +322,7 @@ fn phantom1() {
             // are going to add #[may_dangle] for the same reason as shown above.
             // ptr::drop_in_place would do nothing to a reference. That's fine. references does
             // nothing except for dropping the memory to store those references.
+            println!("a dropped");
             unsafe {
                 ptr::drop_in_place(self.0);
                 alloc::dealloc(self.0 as *mut u8, Layout::new::<T>())
@@ -323,7 +344,9 @@ fn phantom1() {
     let s = String::from("233");
     a.move_in(&s);
     drop(s);
-    // a get dropped here where &s is dangling
+    println!("s dropped");
+    println!("&s dangles ever since");
+    // a get dropped here when &s is dangling
 }
 
 // On the other hand, if T is actually OWNED by MyBox like MyBox<T>, we must drop all of them
@@ -342,6 +365,7 @@ fn phantom2() {
         }
     }
     unsafe impl<#[may_dangle] T> Drop for MyBox<T> {
+    // impl<T> Drop for MyBox<T> { // If this line uncommented?
         fn drop(&mut self) {
             println!("MyBox dropped");
             unsafe {
@@ -367,12 +391,14 @@ fn phantom2() {
     a.move_in(PrintOnDrop(s.as_str()));
     drop(s);
     println!("s dropped");
+    // MyBox dropped here
     // run the code to see the output.
 }
 
 // The point to resolve this trouble is to make T owned by MyVec in some way. Something tricky like
 // a zero-sized array in C language might have it settled but in rust we have a dedicated type,
-// PhantomData<T>, for this.
+// PhantomData<T>, for this. What is
+// [PhantomData](https://doc.rust-lang.org/std/marker/struct.PhantomData.html)?
 #[allow(unused)]
 fn phantom3() {
     struct MyBox<T>(*mut T, PhantomData<T>);

@@ -15,4 +15,4 @@ run_release:
 clean:
 	cargo clean
 	rm -rf profile
-	rm profile.svg
+	rm -f profile.svg
